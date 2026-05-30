@@ -30,13 +30,13 @@ class PolicyNetwork(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(state_dim + latent_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc_out = nn.Linear(hidden_dim, action_dim)  # output score (continuous)
+        self.fc_out = nn.Linear(hidden_dim, action_dim)
 
     def forward(self, state, z):
         x = torch.cat([state, z], dim=1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        return self.fc_out(x).squeeze(-1)  # predicted return
+        return self.fc_out(x).squeeze(-1)
 
 class AmortisedRLAgent:
     def __init__(self, state_dim=20, latent_dim=8, hidden_dim=64, lr_vae=1e-3, lr_policy=1e-4):
@@ -59,12 +59,13 @@ class AmortisedRLAgent:
             state = torch.tensor(state_returns, dtype=torch.float32).view(1, -1)
             z = torch.tensor(latent_z, dtype=torch.float32).view(1, -1)
             score = self.policy(state, z).item()
+            # Guard against NaN / inf
+            if np.isnan(score) or np.isinf(score):
+                score = 0.0
         return score
 
     def train_step(self, context_batch, state_batch, target_batch):
         """context_batch: (batch, seq_len, 1); state_batch: (batch, state_dim); target_batch: (batch, 1)"""
-        # VAE reconstruction loss on target? Actually in PEARL, we train VAE to maximise expected return.
-        # For simplicity, we train end-to-end: the policy predicts return, and we also have a KL regularisation.
         mu, logvar = self.encoder(context_batch)
         z = self.encoder.sample(mu, logvar)
         pred = self.policy(state_batch, z)
@@ -86,14 +87,11 @@ def prepare_meta_task(returns_df, window_days, context_len=20):
     n = len(returns_df)
     if n < window_days + 1:
         return None
-    # Use last window_days to form context + state
     ret_series = returns_df.iloc[-window_days:].values.flatten()
-    # Use first context_len days as context, next state_len days as state, and the day after as target
-    # But simpler: state = recent returns, target = next day return
     if len(ret_series) < context_len + 2:
         return None
     context = ret_series[:context_len]
-    state = ret_series[context_len:context_len+20]  # state_dim=20
+    state = ret_series[context_len:context_len+20]
     target = ret_series[context_len+20] if len(ret_series) > context_len+20 else None
     if target is None:
         return None
