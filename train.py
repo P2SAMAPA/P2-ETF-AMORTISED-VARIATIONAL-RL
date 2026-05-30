@@ -10,7 +10,10 @@ import data_manager as dm
 from amortised_rl import AmortisedRLAgent, prepare_meta_task
 
 def normalize_scores(score_dict):
+    """Normalize scores to [0,1], replacing NaN/inf with 0."""
     scores = np.array(list(score_dict.values()))
+    # Replace NaN and inf with 0
+    scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
     min_s, max_s = scores.min(), scores.max()
     if max_s - min_s < 1e-12:
         return {k: 0.0 for k in score_dict}
@@ -19,7 +22,6 @@ def normalize_scores(score_dict):
 
 def train_agent_for_window(returns_df, window_days, agent, epochs=50, batch_size=16):
     """Train the agent on tasks sampled from the rolling window."""
-    # Generate all possible tasks from the returns series
     tasks = []
     for start in range(0, len(returns_df) - window_days - config.CONTEXT_SIZE - 20, 5):
         segment = returns_df.iloc[start:start+window_days]
@@ -28,13 +30,11 @@ def train_agent_for_window(returns_df, window_days, agent, epochs=50, batch_size
             tasks.append(task)
     if len(tasks) < batch_size:
         return
-    # Convert to tensors
     context_list, state_list, target_list = [], [], []
     for ctx, st, tgt in tasks:
         context_list.append(ctx)
         state_list.append(st)
         target_list.append(tgt)
-    # Create dataset
     context_t = torch.tensor(np.array(context_list), dtype=torch.float32).unsqueeze(-1)
     state_t = torch.tensor(np.array(state_list), dtype=torch.float32)
     target_t = torch.tensor(np.array(target_list), dtype=torch.float32).unsqueeze(-1)
@@ -50,16 +50,13 @@ def train_agent_for_window(returns_df, window_days, agent, epochs=50, batch_size
 
 def run_for_window(returns, window_days, agent=None):
     if len(returns) < window_days + config.CONTEXT_SIZE + 20:
-        return None
-    # Train agent on tasks from this window
+        return None, agent
     if agent is None:
         agent = AmortisedRLAgent(state_dim=20, latent_dim=config.LATENT_DIM, hidden_dim=config.HIDDEN_SIZE,
                                  lr_vae=config.VAE_LEARNING_RATE, lr_policy=config.POLICY_LEARNING_RATE)
     train_agent_for_window(returns, window_days, agent, epochs=config.TRAIN_EPOCHS, batch_size=config.META_BATCH_SIZE)
-    # Now compute scores for each ETF using its own context and state
     scores = {}
     for ticker in returns.columns:
-        # Use the full window as context/state for this ETF
         series = returns[ticker].values
         if len(series) < window_days:
             scores[ticker] = 0.0
@@ -73,6 +70,9 @@ def run_for_window(returns, window_days, agent=None):
             state = np.pad(state, (0, 20 - len(state)), constant_values=0)
         latent = agent.get_latent(context)
         score = agent.predict_score(state, latent)
+        # Sanitize score
+        if np.isnan(score) or np.isinf(score):
+            score = 0.0
         scores[ticker] = float(score)
     return scores, agent
 
@@ -93,13 +93,15 @@ def main():
             print("  No data -> skipping")
             continue
         all_window_results = []
-        agent = None  # reuse agent? better to train per window
+        agent = None
         for w in config.WINDOWS:
             print(f"  Window {w} days")
             try:
                 raw_scores, agent = run_for_window(returns, w, agent)
                 if raw_scores is None:
                     continue
+                # Clean raw_scores again (should already be cleaned)
+                raw_scores = {k: 0.0 if np.isnan(v) or np.isinf(v) else v for k, v in raw_scores.items()}
                 norm_scores = normalize_scores(raw_scores)
                 sorted_norm = sorted(norm_scores.items(), key=lambda x: x[1], reverse=True)
                 top_etfs = [{"ticker": t, "avi_score_norm": s, "raw_score": raw_scores[t]} for t, s in sorted_norm[:config.TOP_N]]
